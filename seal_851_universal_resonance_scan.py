@@ -1,4 +1,4 @@
-# seal_851_universal_resonance_scan.py
+seal_851_universal_resonance_scan.py
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
