@@ -1,0 +1,153 @@
+# phi_lattice_spectral_test.py
+# SEAL A — Spectral Stability Benchmark for φ-Lattice
+
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+
+# ================================
+# 1. Helpers de espectro
+# ================================
+
+def laplacian_spectrum_metrics(G):
+    """Calcula autovalores do Laplaciano e métricas básicas."""
+    L = nx.laplacian_matrix(G).astype(float).todense()
+    eigvals = np.linalg.eigvalsh(L)  # ordenados
+    eigvals = np.real(eigvals)
+
+    lambda_1 = eigvals[0]
+    lambda_2 = eigvals[1] if len(eigvals) > 1 else 0.0
+    lambda_max = eigvals[-1]
+
+    spectral_gap = lambda_2 - lambda_1
+    normalized_gap = spectral_gap / (lambda_max + 1e-9)
+
+    return {
+        "eigvals": eigvals,
+        "lambda_1": lambda_1,
+        "lambda_2": lambda_2,
+        "lambda_max": lambda_max,
+        "spectral_gap": spectral_gap,
+        "normalized_gap": normalized_gap,
+    }
+
+def print_metrics(name, metrics):
+    print(f"\n=== {name} ===")
+    print(f"λ1 (trivial)       : {metrics['lambda_1']:.4f}")
+    print(f"λ2 (conn. algébrica): {metrics['lambda_2']:.4f}")
+    print(f"λmax                : {metrics['lambda_max']:.4f}")
+    print(f"Spectral gap        : {metrics['spectral_gap']:.4f}")
+    print(f"Gap normalizado     : {metrics['normalized_gap']:.4f}")
+
+# ================================
+# 2. Construindo o φ-Lattice
+# ================================
+
+def build_phi_lattice_graph(N=256, k=4):
+    """
+    φ-Lattice 1D em círculo:
+    - Cada nó i é colocado em um ângulo θ_i = frac(i * φ) * 2π
+    - Conecta k vizinhos mais próximos em ângulo (aperiódico)
+    """
+    phi = (1 + np.sqrt(5)) / 2
+    indices = np.arange(N)
+    angles = (indices * phi) % 1.0  # [0,1)
+    angles_sorted_idx = np.argsort(angles)
+    
+    G = nx.Graph()
+    G.add_nodes_from(range(N))
+
+    # Conecta em anel a partir da ordem angular, com k/2 pra cada lado
+    half_k = k // 2
+    ordered_nodes = angles_sorted_idx.tolist()
+
+    for idx, node in enumerate(ordered_nodes):
+        for j in range(1, half_k + 1):
+            n1 = node
+            n2 = ordered_nodes[(idx + j) % N]
+            G.add_edge(n1, n2)
+            n3 = ordered_nodes[(idx - j) % N]
+            G.add_edge(n1, n3)
+
+    return G
+
+# ================================
+# 3. Outros grafos baseline
+# ================================
+
+def build_baselines(N=256, k=4):
+    graphs = {}
+
+    # Grid 2D ~ sqrt(N) x sqrt(N)
+    side = int(np.sqrt(N))
+    G_grid = nx.grid_2d_graph(side, side, periodic=False)
+    # renomear nós (0..N-1)
+    mapping = {node: i for i, node in enumerate(G_grid.nodes())}
+    G_grid = nx.relabel_nodes(G_grid, mapping)
+    graphs["Grid 2D"] = G_grid
+
+    # Small-world (Watts–Strogatz)
+    G_sw = nx.watts_strogatz_graph(N, k, 0.1)
+    graphs["Small-World"] = G_sw
+
+    # Random (Erdős–Rényi)
+    p = k / (N - 1)
+    G_er = nx.erdos_renyi_graph(N, p)
+    graphs["Erdos-Renyi"] = G_er
+
+    # Scale-free (Barabási–Albert)
+    m = max(1, k // 2)
+    G_ba = nx.barabasi_albert_graph(N, m)
+    graphs["Scale-Free"] = G_ba
+
+    return graphs
+
+# ================================
+# 4. Rodando experimento
+# ================================
+
+N = 256   # número de nós
+k = 8     # grau médio alvo
+
+print(f"Usando N={N}, k≈{k}\n")
+
+# φ-Lattice
+G_phi = build_phi_lattice_graph(N=N, k=k)
+metrics_phi = laplacian_spectrum_metrics(G_phi)
+print_metrics("φ-Lattice", metrics_phi)
+
+# Baselines
+baselines = build_baselines(N=N, k=k)
+metrics_all = {"φ-Lattice": metrics_phi}
+
+for name, G in baselines.items():
+    metrics = laplacian_spectrum_metrics(G)
+    metrics_all[name] = metrics
+    print_metrics(name, metrics)
+
+# ================================
+# 5. Plot comparativo do espectro
+# ================================
+
+plt.figure(figsize=(10,6))
+
+for name, metrics in metrics_all.items():
+    eigvals = metrics["eigvals"]
+    x = np.arange(len(eigvals))
+    plt.plot(x, eigvals, marker='.', linestyle='-', alpha=0.6, label=name)
+
+plt.xlabel("Índice do autovalor")
+plt.ylabel("Autovalor do Laplaciano")
+plt.title("Comparação Espectral — φ-Lattice vs Baselines")
+plt.legend()
+plt.grid(alpha=0.2)
+plt.tight_layout()
+plt.show()
+
+# ================================
+# 6. Resumo em tabela rápida
+# ================================
+
+print("\n=== Resumo (λ2 e gap normalizado) ===")
+for name, m in metrics_all.items():
+    print(f"{name:12s}  λ2={m['lambda_2']:.4f}   gap_norm={m['normalized_gap']:.4f}")
