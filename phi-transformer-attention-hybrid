@@ -1,0 +1,147 @@
+phi-transformer-attention-hybrid/
+├── README.md
+├── requirements.txt
+├── phi_mask/
+│   ├── __init__.py
+│   ├── phi_lattice.py        # gera a φ-lattice / adjacency
+│   ├── phi_attention.py      # mascara de atenção baseada na lattice
+├── experiments/
+│   ├── kuramoto_stress_test.py
+│   ├── benchmark_transformer.py
+├── utils/
+│   ├── metrics.py            # coherence, Lyapunov-like metrics simples
+│   ├── plotting.py           # salvar gráficos
+└── examples/
+    ├── demo_phi_attention.ipynb 
+import torch
+
+def build_phi_lattice(seq_len: int, device="cpu"):
+    """
+    Cria uma adjacency matrix [L, L] inspirada em padrões φ / Fibonacci.
+    Não é 'a' φ-lattice definitiva, mas uma topologia aperiódica estável e replicável.
+    """
+    L = seq_len
+    idx = torch.arange(L, device=device).float()
+
+    # Distância normalizada entre posições
+    dist = torch.abs(idx.unsqueeze(0) - idx.unsqueeze(1))  # [L, L]
+
+    # Conjunto de "saltos" privilegiados (Fibonacci-like)
+    fib_steps = torch.tensor([1, 2, 3, 5, 8, 13], device=device).float().view(-1, 1, 1)
+
+    # Afinidade: menor distância de cada par para um passo de Fibonacci
+    fib_dist = torch.min(torch.abs(dist.unsqueeze(0) - fib_steps), dim=0).values  # [L, L]
+
+    # Kernel de afinidade (menor distância → maior peso)
+    phi = (1.0 + 5.0 ** 0.5) / 2.0
+    affinity = torch.exp(-fib_dist / phi)
+
+    # Remove diagonal perfeita para evitar auto-loop forte
+    affinity = affinity - torch.diag(torch.diag(affinity)) + torch.eye(L, device=device) * affinity.mean()
+
+    # Normaliza linha a linha
+    row_sums = affinity.sum(dim=-1, keepdim=True) + 1e-9
+    adjacency = affinity / row_sums
+    return adjacency  # [L, L]
+import torch
+import torch.nn as nn
+from .phi_lattice import build_phi_lattice
+
+class PhiAttentionMask(nn.Module):
+    """
+    Gera um attention bias [1, 1, L, L] baseado na φ-lattice.
+    Pode ser somado ao score de atenção (antes do softmax).
+    """
+    def __init__(self, max_len: int, strength: float = 1.0, device="cpu"):
+        super().__init__()
+        self.max_len = max_len
+        self.strength = strength
+        self.device = device
+
+        # pré-calcula uma lattice máxima
+        adj = build_phi_lattice(max_len, device=device)
+        self.register_buffer("phi_adj", adj)
+
+    def forward(self, seq_len: int):
+        adj = self.phi_adj[:seq_len, :seq_len]  # [L, L]
+
+        # transforma adjacency em bias logarítmico
+        bias = torch.log(adj + 1e-9) * self.strength  # [L, L]
+
+        # shape [1, 1, L, L] para somar no attention score
+        return bias.unsqueeze(0).unsqueeze(0)
+def apply_phi_attention_mask(attn_scores, phi_bias):
+    """
+    attn_scores: [B, H, L, L]
+    phi_bias:    [1, 1, L, L]
+    """
+    return attn_scores + phi_bias  # depois entra no softmax
+import torch
+import cmath
+
+def kuramoto_order_parameter(phases: torch.Tensor):
+    """
+    phases: [N] em radianos.
+    Retorna R (0–1), medida de coerência global.
+    """
+    N = phases.numel()
+    z = torch.exp(1j * phases)  # vetor complexo
+    R = torch.abs(z.mean())
+    return R.real
+
+def coherence_drop(baseline_R, perturbed_R):
+    """
+    Queda relativa de coerência em %.
+    """
+    return float((baseline_R - perturbed_R) / (baseline_R + 1e-9) * 100.0)
+import torch
+from utils.metrics import kuramoto_order_parameter, coherence_drop
+from phi_mask.phi_lattice import build_phi_lattice
+
+def kuramoto_step(theta, omega, K, adjacency, dt=0.01):
+    """
+    Uma iteração de um sistema tipo Kuramoto discreto.
+    theta: [N]
+    omega: [N]
+    adjacency: [N, N] (pesos de acoplamento)
+    """
+    N = theta.size(0)
+    theta_diff = theta.unsqueeze(0) - theta.unsqueeze(1)  # [N, N]
+    coupling = (adjacency * torch.sin(theta_diff)).sum(dim=-1) / N
+    dtheta = omega + K * coupling
+    return theta + dt * dtheta
+
+def run_kuramoto_sim(N=64, steps=500, K=2.0, dt=0.02, use_phi=False, device="cpu"):
+    theta = torch.rand(N, device=device) * 2 * torch.pi
+    omega = torch.zeros(N, device=device)
+
+    if use_phi:
+        adjacency = build_phi_lattice(N, device=device)
+    else:
+        # rede regular / completamente conectada
+        adjacency = torch.ones(N, N, device=device)
+        adjacency /= adjacency.sum(dim=-1, keepdim=True)
+
+    # baseline: sem perturbação
+    theta_base = theta.clone()
+    for _ in range(steps):
+        theta_base = kuramoto_step(theta_base, omega, K, adjacency, dt)
+    R_base = kuramoto_order_parameter(theta_base)
+
+    # perturbação: reset em alguns nós
+    theta_pert = theta_base.clone()
+    idx = torch.randperm(N)[: int(0.2 * N)]
+    theta_pert[idx] = torch.rand_like(theta_pert[idx]) * 2 * torch.pi
+
+    for _ in range(steps):
+        theta_pert = kuramoto_step(theta_pert, omega, K, adjacency, dt)
+    R_pert = kuramoto_order_parameter(theta_pert)
+
+    drop = coherence_drop(R_base, R_pert)
+    return float(R_base), float(R_pert), drop
+
+if __name__ == "__main__":
+    for use_phi in [False, True]:
+        label = "vanilla" if not use_phi else "phi-lattice"
+        Rb, Rp, d = run_kuramoto_sim(use_phi=use_phi)
+        print(f"{label} -> baseline R={Rb:.3f}, perturbed R={Rp:.3f}, drop={d:.2f}%")
